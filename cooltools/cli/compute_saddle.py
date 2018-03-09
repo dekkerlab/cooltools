@@ -32,6 +32,33 @@ def make_cis_obsexp_fetcher(clr, expected, name):
                 toeplitz(expected.loc[chrom][name].values)
         )
 
+
+
+def make_cis_obsexp_diagband_fetcher(clr, expected, name, band_width_bins, inside=True):
+    """
+    Given a cooler object 'clr',
+    cis-expected dataframe 'expected',
+    and a column-name in cis-expected 'name',
+    this function yields a function that
+    returns slice of OBS/EXP for a given 
+    chromosome.
+
+    Custom one with an additional band selector ...
+    """
+    full_obsexp = clr.matrix().fetch(chrom) / 
+                toeplitz(expected.loc[chrom][name].values)
+    i,j = np.indices(full_obsexp.shape)
+    i = i.flatten()
+    j = j.flatten()
+    # fill NaNs outside of the desired selection:
+    nan_band_selector = (np.abs(i-j) > band_width_bins) \
+                     if inside else (np.abs(i-j) <= band_width_bins)
+    full_obsexp[i[nan_band_selector],j[nan_band_selector]] = np.nan
+    return full_obsexp
+
+
+
+
 def make_trans_obsexp_fetcher(clr, expected, name):
     """
     Given a cooler object 'clr',
@@ -203,6 +230,20 @@ def get_compartment_strength(saddledata, fraction):
     default='cis',
     show_default=True)
 @click.option(
+    '--int-distance',
+    help="Specify interaction distance to limit"
+         " saddledata aggregation."
+         " Useable in cis only.",
+    type=float)
+@click.option(
+    '--longrange',
+    help="Select interactions greater than 'int-distance'."
+         " Useable in cis only in combination with"
+         " '--int-distance' option",
+    is_flag=True,
+    default=False,
+    show_default=True)
+@click.option(
     # prange : pair of floats
     '--prange',
     help="The percentile of the genome-wide range of the track values used to"
@@ -280,6 +321,8 @@ def compute_saddle(
             expected_name,
             n_bins,
             contact_type,
+            int_distance,
+            longrange,
             prange,
             vrange,
             by_percentile,
@@ -432,11 +475,28 @@ def compute_saddle(
     # define OBS/EXP getter functions,
     # it's contact_type dependent:
     if contact_type == "cis":
-        obsexp_func = make_cis_obsexp_fetcher(c, expected, expected_name)
+        if int_distance and longrange:
+            if verbose:
+                print("\naggregating cis-data outside of the {}Mb diagonal band\n\n".format(int_distance/1e6))
+            obsexp_func = make_cis_obsexp_diagband_fetcher(c,
+                                expected,
+                                expected_name,
+                                band_width_bins = int(int_distance/c.info['binsize']),
+                                inside=False)
+        elif int_distance:
+            if verbose:
+                print("\naggregating cis-data inside of the {}Mb diagonal band\n\n".format(int_distance/1e6))
+            obsexp_func = make_cis_obsexp_diagband_fetcher(c,
+                                expected,
+                                expected_name,
+                                band_width_bins = int(int_distance/c.info['binsize']),
+                                inside=True)
+        else:
+            if verbose:
+                print("\naggregating cis-data\n\n")
+            obsexp_func = make_cis_obsexp_fetcher(c, expected, expected_name)
     elif contact_type == "trans":
         obsexp_func = make_trans_obsexp_fetcher(c, expected, expected_name)
-
-
 
     # digitize the track (i.e., compartment track)
     # no matter the contact_type ...
