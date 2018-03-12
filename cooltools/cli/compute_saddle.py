@@ -485,7 +485,7 @@ def compute_saddle(
             obsexp_func = make_cis_obsexp_diagband_fetcher(c,
                                 expected,
                                 expected_name,
-                                band_width_bins = int(int_distance/c.info['binsize']),
+                                band_width_bins = int(int_distance/c.info['bin-size']),
                                 inside=False)
         elif int_distance:
             if verbose:
@@ -493,7 +493,7 @@ def compute_saddle(
             obsexp_func = make_cis_obsexp_diagband_fetcher(c,
                                 expected,
                                 expected_name,
-                                band_width_bins = int(int_distance/c.info['binsize']),
+                                band_width_bins = int(int_distance/c.info['bin-size']),
                                 inside=True)
         else:
             if verbose:
