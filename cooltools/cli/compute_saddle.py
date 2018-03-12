@@ -45,7 +45,7 @@ def make_cis_obsexp_diagband_fetcher(clr, expected, name, band_width_bins, insid
 
     Custom one with an additional band selector ...
     """
-    full_obsexp = clr.matrix().fetch(chrom) / 
+    full_obsexp = clr.matrix().fetch(chrom) / \
                 toeplitz(expected.loc[chrom][name].values)
     i,j = np.indices(full_obsexp.shape)
     i = i.flatten()
