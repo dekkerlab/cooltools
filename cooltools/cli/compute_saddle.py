@@ -45,16 +45,20 @@ def make_cis_obsexp_diagband_fetcher(clr, expected, name, band_width_bins, insid
 
     Custom one with an additional band selector ...
     """
-    full_obsexp = clr.matrix().fetch(chrom) / \
-                toeplitz(expected.loc[chrom][name].values)
-    i,j = np.indices(full_obsexp.shape)
-    i = i.flatten()
-    j = j.flatten()
-    # fill NaNs outside of the desired selection:
-    nan_band_selector = (np.abs(i-j) > band_width_bins) \
-                     if inside else (np.abs(i-j) <= band_width_bins)
-    full_obsexp[i[nan_band_selector],j[nan_band_selector]] = np.nan
-    return full_obsexp
+    def _getter(chrom, _):
+        full_obsexp = ( clr.matrix().fetch(chrom) /
+                    toeplitz(expected.loc[chrom][name].values) )
+        i,j = np.indices(full_obsexp.shape)
+        i = i.flatten()
+        j = j.flatten()
+        # fill NaNs outside of the desired selection:
+        nan_band_selector = (np.abs(i-j) > band_width_bins) \
+                         if inside else (np.abs(i-j) <= band_width_bins)
+        full_obsexp[i[nan_band_selector],j[nan_band_selector]] = np.nan
+        return full_obsexp
+    # return the _getter function itself ...
+    # function of (chrom, _)
+    return _getter
 
 
 
