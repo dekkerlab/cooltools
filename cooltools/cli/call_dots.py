@@ -1,4 +1,5 @@
 from functools import partial, reduce
+# from itertools import chain
 import multiprocess as mp
 import click
 
@@ -6,6 +7,8 @@ from scipy.stats import poisson
 import pandas as pd
 import numpy as np
 import cooler
+
+from os import path
 
 from . import cli
 from ..lib.numutils import LazyToeplitz, get_kernel
@@ -15,12 +18,15 @@ from .. import dotfinder
 # for lambda-chunking are computed: W1 is the # of logspaced lambda bins,
 # and W2 is maximum "allowed" raw number of contacts per Hi-C heatmap bin:
 HiCCUPS_W1_MAX_INDX = 40
+# HFF combined exceeded this limit ...
+HiCCUPS_W1_MAX_INDX = 46
 # we are not using 'W2' as we're building
 # the histograms dynamically:
 HiCCUPS_W2_MAX_INDX = 10000
 
 
 def score_tile(tile_cij, clr, cis_exp, exp_v_name, bal_v_name, kernels,
+               minimal_separation,
                nans_tolerated, band_to_cover, balance_factor, verbose):
     """
     The main working function that given a tile of a heatmap, applies kernels to
@@ -34,7 +40,7 @@ def score_tile(tile_cij, clr, cis_exp, exp_v_name, bal_v_name, kernels,
         Tuple of 3: chromosome name, tile span row-wise, tile span column-wise:
         (chrom, tile_i, tile_j), where tile_i = (start_i, end_i), and
         tile_j = (start_j, end_j).
-    clr : cooler
+    clr : coolerr
         Cooler object to use to extract Hi-C heatmap data.
     cis_exp : pandas.DataFrame
         DataFrame with 1 dimensional expected, indexed with 'chrom' and 'diag'.
@@ -46,6 +52,9 @@ def score_tile(tile_cij, clr, cis_exp, exp_v_name, bal_v_name, kernels,
     kernels : dict
         A dictionary with keys being kernels names and values being ndarrays
         representing those kernels.
+    minimal_separation : int
+        Minimal genomic separation considered for this generic, fixed-kernel
+        size convolution step.
     nans_tolerated : int
         Number of NaNs tolerated in a footprint of every kernel.
     band_to_cover : int
@@ -84,18 +93,21 @@ def score_tile(tile_cij, clr, cis_exp, exp_v_name, bal_v_name, kernels,
     bal_weight_j = clr.bins()[slice(*tilej)][bal_v_name].values
     
     # do the convolutions
-    result = dotfinder.get_adjusted_expected_tile_some_nans(
-        origin=origin,
-        observed=observed,
-        expected=expected,
-        bal_weights=(bal_weight_i,bal_weight_j),
-        kernels=kernels,
-        balance_factor=balance_factor,
-        verbose=verbose)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        result = dotfinder.get_adjusted_expected_tile_some_nans(
+            origin=origin,
+            observed=observed,
+            expected=expected,
+            bal_weights=(bal_weight_i,bal_weight_j),
+            kernels=kernels,
+            balance_factor=balance_factor,
+            verbose=verbose)
 
     # Post-processing filters
-    # (1) exclude pixels that connect loci further than 'band_to_cover' apart:
-    is_inside_band = (result["bin1_id"] > (result["bin2_id"]-band_to_cover))
+    # (1) exclude pixels that connect loci further than 'band_to_cover' apart,
+    # and pixels that are closer than "minimal_separation" to each other:s
+    is_inside_band  = (result["bin1_id"] > (result["bin2_id"]-band_to_cover))
+    is_inside_band &= (result["bin1_id"] < (result["bin2_id"]-minimal_separation))
 
     # (2) identify pixels that pass number of NaNs compliance test for ALL kernels:
     does_comply_nans = np.all(
@@ -104,17 +116,162 @@ def score_tile(tile_cij, clr, cis_exp, exp_v_name, bal_v_name, kernels,
     # so, selecting inside band and nNaNs compliant results:
     # ( drop dropping index maybe ??? ) ...
     res_df = result[is_inside_band & does_comply_nans].reset_index(drop=True)
-    ########################################################################
-    # consider retiring Poisson testing from here, in case we
-    # stick with l-chunking or opposite - add histogramming business here(!)
-    ########################################################################
-    # do Poisson tests:
-    get_pval = lambda la_exp : 1.0 - poisson.cdf(res_df["obs.raw"], la_exp)
-    for k in kernels:
-        res_df["la_exp."+k+".pval"] = get_pval( res_df["la_exp."+k+".value"] )
+    # ########################################################################
+    # # consider retiring Poisson testing from here, in case we
+    # # stick with l-chunking or opposite - add histogramming business here(!)
+    # ########################################################################
+    # # do Poisson tests:
+    # get_pval = lambda la_exp : 1.0 - poisson.cdf(res_df["obs.raw"], la_exp)
+    # for k in kernels:
+    #     res_df["la_exp."+k+".pval"] = get_pval(res_df["la_exp."+k+".value"])
     
     # annotate and return
     return cooler.annotate(res_df.reset_index(drop=True), clr.bins()[:])
+
+
+
+##########################################
+# ROUGH ATTEMPT TO PROTOTYPE A TILE-SCORING FUNCTION
+# WITH THE SHRINKING "DONUTS" ...
+# this is a special near diagonal case and we'll
+# keep it as such at least for now ...
+#########################################
+def score_tile_diag(tile_cij, clr, cis_exp, exp_v_name, bal_v_name, kernels,
+               shrinkage_num,
+               minimal_separation,
+               nans_tolerated, band_to_cover, balance_factor, verbose):
+    """
+    The main working function that given a tile of a heatmap, applies kernels to
+    perform convolution to calculate locally-adjusted expected and then
+    calculates a p-value for every meaningfull pixel against these l.a. expected
+    values.
+    
+    Parameters
+    ----------
+    tile_cij : tuple
+        Tuple of 3: chromosome name, tile span row-wise, tile span column-wise:
+        (chrom, tile_i, tile_j), where tile_i = (start_i, end_i), and
+        tile_j = (start_j, end_j).
+    clr : coolerr
+        Cooler object to use to extract Hi-C heatmap data.
+    cis_exp : pandas.DataFrame
+        DataFrame with 1 dimensional expected, indexed with 'chrom' and 'diag'.
+    exp_v_name : str
+        Name of a value column in expected DataFrame
+    bal_v_name : str
+        Name of a value column with balancing weights in a cooler.bins()
+        DataFrame. Typically 'weight'.
+    kernels : dict
+        A dictionary with keys being kernels names and values being ndarrays
+        representing those kernels. Right now we assume that each kernel
+        is a square matrix of the same size.
+    shrinkage_num : int
+        Highest number of pixel-layers that needs to be shaved off each kernel.
+        In other words the number of shrinkage iterations we must perform
+        in order to approach diagonal as close as possible.
+    minimal_separation : int
+        Smallest genomic separation we consider even with the most shrunk kernels.
+        This refers to "separation < p+2" from Rao et al. 2014.
+    nans_tolerated : int
+        Number of NaNs tolerated in a footprint of every kernel.
+    band_to_cover : int
+        Results would be stored only for pixels connecting loci closer than
+        'band_to_cover'.
+    balance_factor : float
+        Balancing factor to turn sum of balanced matrix back approximately
+        to the number of pairs (used for dynamic-donut criteria mostly).
+        use None value to disable dynamic-donut criteria calculation.
+    verbose : bool
+        Enable verbose output.
+        
+    Returns
+    -------
+    res_df : pandas.DataFrame
+        results: annotated pixels with calculated locally adjusted expected
+        for every kernels, observed, precalculated pvalues, number of NaNs in
+        footprint of every kernels, all of that in a form of an annotated
+        pixels DataFrame for eligible pixels of a given tile.
+
+    """
+    # unpack tile's coordinates
+    chrom, tilei, tilej = tile_cij
+    origin = (tilei[0], tilej[0])
+
+    # we have to do it for every tile, because
+    # chrom is not known apriori (maybe move outside):
+    lazy_exp = LazyToeplitz(cis_exp.loc[chrom][exp_v_name].values)
+    
+    # RAW observed matrix slice:
+    observed = clr.matrix(balance=False)[slice(*tilei), slice(*tilej)]
+    # expected as a rectangular tile :
+    expected = lazy_exp[slice(*tilei), slice(*tilej)]
+    # slice of balance_weight for row-span and column-span :
+    bal_weight_i = clr.bins()[slice(*tilei)][bal_v_name].values
+    bal_weight_j = clr.bins()[slice(*tilej)][bal_v_name].values
+
+    # this is an ugly way to extract a kernel size from a dict,
+    # assuming all kernels are squares of equal szie:
+    kernel_size, *rest = [kernels[k].shape[0] for k in kernels]
+
+    # prepare empty list to accumulate resutls DataFrames:
+    res_df = []
+    # do the convolutions
+    for shrink_iter in range(1,shrinkage_num):
+        # start shrinking kernels right away:
+        shrunk_kernels = {k:kernels[k][shrink_iter:-shrink_iter,
+                                     shrink_iter:-shrink_iter] \
+                            for k in kernels}
+        # run convolution using shrunk kernels:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            result = dotfinder.get_adjusted_expected_tile_some_nans(
+                origin=origin,
+                observed=observed,
+                expected=expected,
+                bal_weights=(bal_weight_i,bal_weight_j),
+                kernels=shrunk_kernels,
+                balance_factor=balance_factor,
+                verbose=verbose)
+
+        # Post-processing filters
+        # (1) for each shrinkage iteration get only those pixels that
+        # this shirkage iteration is made for (better explained in
+        # an illustration).
+        right_band = kernel_size - (2*shrink_iter - 1)
+        is_right_band  = (result["bin1_id"] == (result["bin2_id"] - right_band ))
+        right_band = kernel_size - (2*shrink_iter)
+        is_right_band |= (result["bin1_id"] == (result["bin2_id"] - right_band ))
+        
+        # (2) identify pixels that pass number of NaNs compliance test for ALL kernels:
+        does_comply_nans = np.all(
+            result[["la_exp."+k+".nnans" for k in kernels]] < nans_tolerated,
+            axis=1)
+        # so, selecting inside band and nNaNs compliant results:
+        # ( drop dropping index maybe ??? ) ...
+        res_df.append( result[is_right_band & does_comply_nans] )
+    ########################################################
+    # add everyhting > minimal_separation after the last iteration:
+    ########################################################
+    is_right_band  = (result["bin1_id"] > result["bin2_id"] - right_band)
+    is_right_band &= (result["bin1_id"] < result["bin2_id"] - minimal_separation)
+    res_df.append( result[is_right_band & does_comply_nans] )
+    # concatenate the resulting list of DataFrames:
+    res_df = pd.concat(res_df, ignore_index=True)
+    # ####################
+    # use some asserrrtions while we're developuing this feature:
+    # assert no duplication, because of the wrong band counting/indexing:
+    assert ~res_df.duplicated().any()
+    # ########################################################################
+    # # consider retiring Poisson testing from here, in case we
+    # # stick with l-chunking or opposite - add histogramming business here(!)
+    # ########################################################################
+    # # do Poisson tests:
+    # get_pval = lambda la_exp : 1.0 - poisson.cdf(res_df["obs.raw"], la_exp)
+    # for k in kernels:
+    #     res_df["la_exp."+k+".pval"] = get_pval(res_df["la_exp."+k+".value"])
+        
+    # annotate and return
+    return cooler.annotate(res_df.reset_index(drop=True), clr.bins()[:])
+
 
 
 def histogram_scored_pixels(scored_df, kernels, ledges, verbose):
@@ -275,58 +432,67 @@ def extract_scored_pixels(scored_df, kernels, thresholds, ledges, verbose):
     return scored_df[comply_fdr_list]
 
 
-def scoring_step(clr, expected, expected_name, tiles, kernels,
-                 max_nans_tolerated, loci_separation_bins, output_path,
-                 nproc, verbose):
-    if verbose:
-        print("Preparing to convolve {} tiles:".format(len(tiles)))
+# def scoring_step(clr, expected, expected_name, tiles, kernels,
+#                  max_nans_tolerated, loci_separation_bins, output_path,
+#                  nproc, verbose):
+#     if verbose:
+#         print("Preparing to convolve {} tiles:".format(len(tiles)))
 
-    # add very_verbose to supress output from convolution of every tile
-    very_verbose = False
-    job = partial(
-        score_tile,
-        clr=clr,
-        cis_exp=expected,
-        exp_v_name=expected_name,
-        bal_v_name='weight',
-        kernels=kernels,
-        nans_tolerated=max_nans_tolerated,
-        band_to_cover=loci_separation_bins,
-        verbose=very_verbose)
+#     # add very_verbose to supress output from convolution of every tile
+#     very_verbose = False
+#     job = partial(
+#         score_tile,
+#         clr=clr,
+#         cis_exp=expected,
+#         exp_v_name=expected_name,
+#         bal_v_name='weight',
+#         kernels=kernels,
+#         nans_tolerated=max_nans_tolerated,
+#         band_to_cover=loci_separation_bins,
+#         verbose=very_verbose)
 
-    if nproc > 1:
-        pool = mp.Pool(nproc)
-        map_ = pool.imap
-        map_kwargs = dict(chunksize=int(np.ceil(len(tiles)/nproc)))
-        if verbose:
-            print("creating a Pool of {} workers to tackle {} tiles".format(
-                    nproc, len(tiles)))
-    else:
-        map_ = map
-        if verbose:
-            print("fallback to serial implementation.")
-        map_kwargs = {}
-    try:
-        # consider using
-        # https://github.com/mirnylab/cooler/blob/9e72ee202b0ac6f9d93fd2444d6f94c524962769/cooler/tools.py#L59
-        # here:
-        chunks = map_(job, tiles, **map_kwargs)
-        append = False
-        for chunk in chunks:
-            chunk.to_hdf(output_path,
-                         key='results',
-                         format='table',
-                         append=append)
-            append = True
-    finally:
-        if nproc > 1:
-            pool.close()
+#     if nproc > 1:
+#         pool = mp.Pool(nproc)
+#         map_ = pool.imap
+#         map_kwargs = dict(chunksize=int(np.ceil(len(tiles)/nproc)))
+#         if verbose:
+#             print("creating a Pool of {} workers to tackle {} tiles".format(
+#                     nproc, len(tiles)))
+#     else:
+#         map_ = map
+#         if verbose:
+#             print("fallback to serial implementation.")
+#         map_kwargs = {}
+#     try:
+#         # consider using
+#         # https://github.com/mirnylab/cooler/blob/9e72ee202b0ac6f9d93fd2444d6f94c524962769/cooler/tools.py#L59
+#         # here:
+#         chunks = map_(job, tiles, **map_kwargs)
+#         append = False
+#         for chunk in chunks:
+#             chunk.to_hdf(output_path,
+#                          key='results',
+#                          format='table',
+#                          append=append)
+#             append = True
+#     finally:
+#         if nproc > 1:
+#             pool.close()
 
 
 
-def scoring_and_histogramming_step(clr, expected, expected_name, tiles, kernels,
-                                   ledges, max_nans_tolerated, loci_separation_bins,
-                                   output_path, nproc, verbose):
+##########################################
+# ROUGH ATTEMPT TO add the near-diag special
+# case in a generic "scoring_and_histogramming_step"
+# ... 
+#########################################
+def scoring_and_histogramming_step(clr, expected, expected_name, tiles,
+                                diag_tiles, kernels, ledges,
+                                max_nans_tolerated, loci_separation_bins,
+                                minimal_separation,
+                                minimal_separation_diag,
+                                shrinkage_num,
+                                nproc, verbose):
     """
     This is a derivative of the 'scoring_step'
     which is supposed to implement the 1st of the
@@ -335,9 +501,13 @@ def scoring_and_histogramming_step(clr, expected, expected_name, tiles, kernels,
     Basically we are piping scoring operation
     together with histogramming into a single
     pipeline of per-chunk operations/transforms.
+
+    In this iteration we are using two types of
+    scoring function, in order to support the
+    near-diagonal shrkiage of the kernels.
     """
     if verbose:
-        print("Preparing to convolve {} tiles:".format(len(tiles)))
+        print("Preparing to convolve and build histogramms ...")
 
     # add very_verbose to supress output from convolution of every tile
     very_verbose = False
@@ -350,6 +520,25 @@ def scoring_and_histogramming_step(clr, expected, expected_name, tiles, kernels,
         exp_v_name=expected_name,
         bal_v_name='weight',
         kernels=kernels,
+        minimal_separation=minimal_separation, # =2w excluding, i.e. starting from 2w+1
+        nans_tolerated=max_nans_tolerated,
+        band_to_cover=loci_separation_bins,
+        # do not calculate dynamic-donut criteria
+        # for now.
+        balance_factor=None,
+        verbose=very_verbose)
+
+    # to score per tile around diag:
+    to_score_diag = partial(
+        score_tile_diag,
+        clr=clr,
+        cis_exp=expected,
+        exp_v_name=expected_name,
+        bal_v_name='weight',
+        kernels=kernels,
+        # number of pixels we can shave off the kernels:
+        shrinkage_num=shrinkage_num, # =w-p; w-p-1 in reality, i.e. excluding last iter.
+        minimal_separation=minimal_separation_diag, # =p+2 excluding, i.e. starting from p+3
         nans_tolerated=max_nans_tolerated,
         band_to_cover=loci_separation_bins,
         # do not calculate dynamic-donut criteria
@@ -364,36 +553,7 @@ def scoring_and_histogramming_step(clr, expected, expected_name, tiles, kernels,
         ledges=ledges,
         verbose=very_verbose)
 
-    # composing/piping scoring and histogramming
-    # together :
-    job = lambda tile : to_hist(to_score(tile))
-
-    # copy paste from @nvictus modified 'scoring_step':
-    if nproc > 1:
-        pool = mp.Pool(nproc)
-        map_ = pool.imap
-        map_kwargs = dict(chunksize=int(np.ceil(len(tiles)/nproc)))
-        if verbose:
-            print("creating a Pool of {} workers to tackle {} tiles".format(
-                    nproc, len(tiles)))
-    else:
-        map_ = map
-        if verbose:
-            print("fallback to serial implementation.")
-        map_kwargs = {}
-    try:
-        # consider using
-        # https://github.com/mirnylab/cooler/blob/9e72ee202b0ac6f9d93fd2444d6f94c524962769/cooler/tools.py#L59
-        # here:
-        hchunks = map_(job, tiles, **map_kwargs)
-        # hchunks TO BE ACCUMULATED
-        # hopefully 'hchunks' would stay in memory
-        # until we would get a chance to accumulate them:
-    finally:
-        if nproc > 1:
-            pool.close()
-    #
-    # now we need to combine/sum all of the histograms
+    # helper function for combining histograms
     # for different kernels:
     #
     # assuming we know "kernels"
@@ -409,6 +569,48 @@ def scoring_and_histogramming_step(clr, expected, expected_name, tiles, kernels,
         # returning the sum:
         return hxy
 
+    # composing/piping scoring and histogramming
+    # together :
+    tasks = [diag_tiles, tiles]
+    jobs  = [lambda t: to_hist(to_score_diag(t)),
+            lambda t: to_hist(to_score(t))]
+
+    hchunks = []
+    if nproc > 1:
+        if verbose:
+            print("Creating a Pool of {} workers".format(nproc))
+        pool = mp.Pool(nproc)
+        map_ = pool.imap
+        # map_ = pool.imap
+    else:
+        map_ = map
+        if verbose:
+            print("fallback to serial implementation.")
+        map_kwargs = {}
+    try:
+        ###########################################
+        # BEWARE: THIS IS BROKEN IN THE CURRENT FORM ...
+        ###########################################
+        # consider using
+        # https://github.com/mirnylab/cooler/blob/9e72ee202b0ac6f9d93fd2444d6f94c524962769/cooler/tools.py#L59
+        # here:
+        for job, task in zip(jobs,tasks):
+            map_kwargs = dict(chunksize=int(np.ceil(len(task)/nproc)))
+            if verbose:
+                print("Pool of {} workers is going to tackle {} tiles".format(
+                        nproc, len(task)))
+            hchunks += map_(job, task, **map_kwargs)
+        # hchunks TO BE ACCUMULATED
+        # hopefully 'hchunks' would stay in memory
+        # until we would get a chance to accumulate them:
+    finally:
+        if nproc > 1:
+            pool.close()
+            pool.join()
+
+
+    if verbose:
+        print("reduce hchunks and diag_hchunks ...")
     # ######################################################
     # this approach is tested and at the very least
     # number of pixels in a dump list matches
@@ -434,10 +636,14 @@ def scoring_and_histogramming_step(clr, expected, expected_name, tiles, kernels,
     return final_hist
 
 
-def scoring_and_extraction_step(clr, expected, expected_name, tiles, kernels,
-                               ledges, thresholds, max_nans_tolerated,
-                               balance_factor, loci_separation_bins, output_path,
-                               nproc, verbose):
+def scoring_and_extraction_step(clr, expected, expected_name, tiles,
+                                diag_tiles, kernels, ledges,
+                                thresholds, max_nans_tolerated,
+                                minimal_separation,
+                                minimal_separation_diag,
+                                shrinkage_num,
+                                balance_factor, loci_separation_bins,
+                                nproc, verbose):
     """
     This is a derivative of the 'scoring_step'
     which is supposed to implement the 2nd of the
@@ -447,9 +653,13 @@ def scoring_and_extraction_step(clr, expected, expected_name, tiles, kernels,
     Basically we are piping scoring operation
     together with extraction into a single
     pipeline of per-chunk operations/transforms.
+
+    In this iteration we are using two types of
+    scoring function, in order to support the
+    near-diagonal shrkiage of the kernels.
     """
     if verbose:
-        print("Preparing to convolve {} tiles:".format(len(tiles)))
+        print("Preparing to convolve and extract ...")
 
     # add very_verbose to supress output from convolution of every tile
     very_verbose = False
@@ -462,8 +672,27 @@ def scoring_and_extraction_step(clr, expected, expected_name, tiles, kernels,
         exp_v_name=expected_name,
         bal_v_name='weight',
         kernels=kernels,
+        minimal_separation=minimal_separation, # =2w excluding, i.e. starting from 2w+1
         nans_tolerated=max_nans_tolerated,
         band_to_cover=loci_separation_bins,
+        balance_factor=balance_factor,
+        verbose=very_verbose)
+
+    # to score per tile around diag:
+    to_score_diag = partial(
+        score_tile_diag,
+        clr=clr,
+        cis_exp=expected,
+        exp_v_name=expected_name,
+        bal_v_name='weight',
+        kernels=kernels,
+        # number of pixels we can shave off the kernels:
+        shrinkage_num=shrinkage_num, # =w-p; w-p-1 in reality, i.e. excluding last iter.
+        minimal_separation=minimal_separation_diag, # =p+2 excluding, i.e. starting from p+3
+        nans_tolerated=max_nans_tolerated,
+        band_to_cover=loci_separation_bins,
+        # do not calculate dynamic-donut criteria
+        # for now.
         balance_factor=balance_factor,
         verbose=very_verbose)
 
@@ -477,16 +706,18 @@ def scoring_and_extraction_step(clr, expected, expected_name, tiles, kernels,
 
     # composing/piping scoring and histogramming
     # together :
-    job = lambda tile : to_extract(to_score(tile))
+    tasks = [diag_tiles, tiles]
+    jobs  = [lambda t: to_extract(to_score_diag(t)),
+            lambda t: to_extract(to_score(t))]
 
+    filtered_pix_chunks = []
     # copy paste from @nvictus modified 'scoring_step':
     if nproc > 1:
-        pool = mp.Pool(nproc)
-        map_ = pool.imap
-        map_kwargs = dict(chunksize=int(np.ceil(len(tiles)/nproc)))
         if verbose:
-            print("creating a Pool of {} workers to tackle {} tiles".format(
-                    nproc, len(tiles)))
+            print("Creating a Pool of {} workers".format(nproc))
+        pool = mp.Pool(nproc)
+        # map_ = pool.map
+        map_ = pool.imap
     else:
         map_ = map
         if verbose:
@@ -496,19 +727,25 @@ def scoring_and_extraction_step(clr, expected, expected_name, tiles, kernels,
         # consider using
         # https://github.com/mirnylab/cooler/blob/9e72ee202b0ac6f9d93fd2444d6f94c524962769/cooler/tools.py#L59
         # here:
-        filtered_pix_chunks = map_(job, tiles, **map_kwargs)
-        significant_pixels = pd.concat(filtered_pix_chunks,ignore_index=True)
-        if output_path is not None:
-            significant_pixels.to_csv(output_path,
-                                      sep='\t',
-                                      header=True,
-                                      index=False,
-                                      compression=None)
+        for job, task in zip(jobs, tasks):
+            map_kwargs = dict(chunksize=int(np.ceil(len(task)/nproc)))
+            if verbose:
+                print("Pool of {} workers is going to tackle {} tiles".format(
+                        nproc, len(task)))
+            filtered_pix_chunks += map_(job, task, **map_kwargs)
+        # accumulate 'filtered_pix_chunks' in a list.
     finally:
         if nproc > 1:
             pool.close()
-    # # concat and store the results if needed:
-    # significant_pixels = pd.concat(filtered_pix_chunks)
+            pool.join()
+
+    if verbose:
+        print("Ready to concatenate chunks if filtered pixels ...")
+
+    ##########################################
+    # concat those 'filtered_pix_chunks' ignoring chunks:
+    significant_pixels = pd.concat(filtered_pix_chunks, ignore_index=True)
+    # return sorted for convenience:
     return significant_pixels \
                 .sort_values(by=["chrom1","chrom2","start1","start2"]) \
                 .reset_index(drop=True)
@@ -626,6 +863,8 @@ def clustering_step(scores_file, expected_chroms, ktypes, fdr,
     # pixels are annotated at this point.
     pixel_clust_list = []
     for chrom  in expected_chroms:
+        if verbose:
+            print("Preparing to cluster dots for {}".format(chrom))
         # probably generate one big DataFrame with clustering
         # information only and then just merge it with the
         # existing 'res_df'-DataFrame.
@@ -670,6 +909,10 @@ def thresholding_step(centroids, output_path):
     enrichment_factor_2 = 1.75
     enrichment_factor_3 = 2.0
     FDR_orphan_threshold = 0.02
+    # # typical FDR threshold commented
+    # # as per Rao14 paper, 0.04 was used
+    # # for primary 10 kb calls:
+    # FDR_orphan_threshold = 0.04
     ######################################################################
     # # Temporarily remove orphans filtering, until q-vals are calculated:
     ######################################################################
@@ -770,8 +1013,10 @@ def thresholding_step(centroids, output_path):
     ]
 
     if output_path is not None:
+        final_output = path.join(path.dirname(output_path), \
+                    'final_' + path.basename(output_path))
         out[columns_for_output].to_csv(
-            "final_"+output_path,
+            final_output,
             sep='\t',
             header=True,
             index=False,
@@ -852,7 +1097,7 @@ def thresholding_step(centroids, output_path):
          " all processed pixels before they get"
          " preprocessed in a BEDPE-like format.",
     type=str,
-    required=True)
+    required=False)
 @click.option(
     "--output-calls", "-o",
     help="Specify output file name where to store"
@@ -1002,6 +1247,8 @@ def call_dots(
     # the last bin must be (2^(HiCCUPS_W1_MAX_INDX/3),+inf):
 
 
+    if verbose:
+        print("preparing big tiles ...")
 
     tiles = list(
         dotfinder.heatmap_tiles_generator_diag(
@@ -1013,6 +1260,28 @@ def call_dots(
         )
     )
 
+    if verbose:
+        print("preparing small diagonal tiles ...")
+
+    # we need to prepare tiles for "shrinking" donuts,
+    # i.e. for convolution near the diagonal:
+    diag_tiles = list(
+        dotfinder.heatmap_tiles_generator_diag(
+            clr,
+            expected_chroms,
+            w,
+            # tile size as big as max separation for these tiles: 2*w+1,
+            400,
+            # pixels separated more than 2w+1 are using standard donut sizes:
+            2*w+1
+        )
+    )
+    #############################
+    # Double check the diag_tiles generator
+    # later on, as tile/max_diag as big as 2w
+    # might be sufficient. Going 2w+1 for now.
+    #############################
+
     # ######################
     # # scoring only yields
     # # a HUGE list of both
@@ -1023,13 +1292,22 @@ def call_dots(
     #              max_nans_tolerated, loci_separation_bins, output_scores,
     #              nproc, verbose)
 
+    if verbose:
+        print("scoring and histogramming ...")
+
+
     ################################
     # calculates genome-wide histogram (gw_hist):
     ################################
-    gw_hist = scoring_and_histogramming_step(clr, expected, expected_name, tiles,
-                                             kernels, ledges, max_nans_tolerated,
-                                             loci_separation_bins, None, nproc,
-                                             verbose)
+    gw_hist = scoring_and_histogramming_step(clr, expected, expected_name,
+                                             tiles, diag_tiles,
+                                             kernels, ledges,
+                                             max_nans_tolerated,
+                                             loci_separation_bins,
+                                             2*w, #minimal_separation:excl
+                                             p+2, #minimal_separation_diag:excl
+                                             w-p, # shrinkage_num:excl,
+                                             nproc, verbose)
     # gw_hist for each kernel contains a histogram of
     # raw pixel intensities for every lambda-chunk (one per column)
     # in a row-wise order, i.e. each column is a histogram
@@ -1120,10 +1398,17 @@ def call_dots(
     # calculated in the histogramming step ...
     ###################
 
-    filtered_pix = scoring_and_extraction_step(clr, expected, expected_name, tiles, kernels,
-                                               ledges, threshold_df, max_nans_tolerated,
-                                               balance_factor, loci_separation_bins, output_calls,
-                                               nproc, verbose)
+    filtered_pix = scoring_and_extraction_step(clr, expected, expected_name,
+                                           tiles, diag_tiles, kernels,
+                                           ledges, threshold_df,
+                                           max_nans_tolerated,
+                                           2*w, #minimal_separation:excl
+                                           p+2, #minimal_separation_diag:excl
+                                           w-p, #shrinkage_num:excl
+                                           balance_factor,
+                                           loci_separation_bins,
+                                           nproc, verbose)
+
 
     if verbose:
         print("preparing to extract needed q-values ...")
@@ -1141,6 +1426,14 @@ def call_dots(
     #   storing q-values: each column corresponds to a lambda-chunk,
     #   while rows correspond to observed pixels values.
 
+    # output significant pixels if it is requested ...
+    # pre-post-processed ones:
+    if output_calls is not None:
+        filtered_pix.to_csv(output_calls,
+                          sep='\t',
+                          header=True,
+                          index=False,
+                          compression=None)
 
     ######################################
     # post processing starts from here on:
@@ -1158,7 +1451,7 @@ def call_dots(
         # (1):
         centroids = clustering_step_local(filtered_pix, expected_chroms,
                                           dots_clustering_radius, verbose)
-        # (2):
+        # (2): output_calls -> final_output_calls ...
         thresholding_step(centroids, output_calls)
         # (3):
         # Call dots for different resolutions individually and then use external methods

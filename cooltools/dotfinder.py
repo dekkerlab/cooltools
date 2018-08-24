@@ -4,11 +4,13 @@ Collection of functions needed for dot-calling
 """
 from scipy.linalg import toeplitz
 from scipy.ndimage import convolve
+from scipy.signal import fftconvolve
 from scipy.stats import poisson
 from scipy.sparse import coo_matrix
 import numpy as np
 import pandas as pd
 from sklearn.cluster import Birch
+from functools import partial
 
 
 def get_qvals(pvals):
@@ -600,17 +602,18 @@ def get_adjusted_expected_tile_some_nans(origin,
         # a matrix filled with the kernel-weighted sums
         # based on a balanced observed matrix:
         KO = convolve(O_bal,
-                      kernel,
-                      mode='constant',
-                      cval=0.0,
-                      origin=0)
+                    kernel,
+                    mode='constant',
+                    cval=0.0,
+                    origin=0)
+
         # a matrix filled with the kernel-weighted sums
         # based on a balanced expected matrix:
         KE = convolve(E_bal,
-                      kernel,
-                      mode='constant',
-                      cval=0.0,
-                      origin=0)
+                    kernel,
+                    mode='constant',
+                    cval=0.0,
+                    origin=0)
         # get number of NaNs in a vicinity of every
         # pixel (kernel's nonzero footprint)
         # based on the NaN-matrix N_bal.
