@@ -195,19 +195,10 @@ def score_tile_diag(tile_cij, clr, cis_exp, exp_v_name, bal_v_name, kernels,
     """
     # unpack tile's coordinates
     chrom, tilei, tilej = tile_cij
-    origin = (tilei[0], tilej[0])
 
     # we have to do it for every tile, because
     # chrom is not known apriori (maybe move outside):
     lazy_exp = LazyToeplitz(cis_exp.loc[chrom][exp_v_name].values)
-    
-    # RAW observed matrix slice:
-    observed = clr.matrix(balance=False)[slice(*tilei), slice(*tilej)]
-    # expected as a rectangular tile :
-    expected = lazy_exp[slice(*tilei), slice(*tilej)]
-    # slice of balance_weight for row-span and column-span :
-    bal_weight_i = clr.bins()[slice(*tilei)][bal_v_name].values
-    bal_weight_j = clr.bins()[slice(*tilej)][bal_v_name].values
 
     # this is an ugly way to extract a kernel size from a dict,
     # assuming all kernels are squares of equal szie:
@@ -215,12 +206,32 @@ def score_tile_diag(tile_cij, clr, cis_exp, exp_v_name, bal_v_name, kernels,
 
     # prepare empty list to accumulate resutls DataFrames:
     res_df = []
+
     # do the convolutions
     for shrink_iter in range(1,shrinkage_num):
+
+        # redefine tilei, tilej for every shrinkage iteration.
+        # it's not the most efficient, but least error-prone way
+        # properly shrink tile-padding along with the kernels:
+        tilei = (tilei[0]+1, tilei[1]-1)
+        tilej = (tilej[0]+1, tilej[1]-1)
+
+        # origin of the redefined tile:
+        origin = (tilei[0], tilej[0])
+        
+        # RAW observed matrix slice:
+        observed = clr.matrix(balance=False)[slice(*tilei), slice(*tilej)]
+        # expected as a rectangular tile :
+        expected = lazy_exp[slice(*tilei), slice(*tilej)]
+        # slice of balance_weight for row-span and column-span :
+        bal_weight_i = clr.bins()[slice(*tilei)][bal_v_name].values
+        bal_weight_j = clr.bins()[slice(*tilej)][bal_v_name].values
+
         # start shrinking kernels right away:
         shrunk_kernels = {k:kernels[k][shrink_iter:-shrink_iter,
                                      shrink_iter:-shrink_iter] \
                             for k in kernels}
+
         # run convolution using shrunk kernels:
         with np.errstate(divide='ignore', invalid='ignore'):
             result = dotfinder.get_adjusted_expected_tile_some_nans(
@@ -240,6 +251,12 @@ def score_tile_diag(tile_cij, clr, cis_exp, exp_v_name, bal_v_name, kernels,
         is_right_band  = (result["bin1_id"] == (result["bin2_id"] - right_band ))
         right_band = kernel_size - (2*shrink_iter)
         is_right_band |= (result["bin1_id"] == (result["bin2_id"] - right_band ))
+        # # MANUAL DEBUG OF THE LAST SHRINKAGE ITERATION:
+        # if shrink_iter == shrinkage_num-1:
+        #     right_band = kernel_size - (2*shrink_iter + 1)
+        #     is_right_band |= (result["bin1_id"] == (result["bin2_id"] - right_band ))
+        #     right_band = kernel_size - (2*shrink_iter + 2)
+        #     is_right_band |= (result["bin1_id"] == (result["bin2_id"] - right_band ))
         
         # (2) identify pixels that pass number of NaNs compliance test for ALL kernels:
         does_comply_nans = np.all(
@@ -248,12 +265,15 @@ def score_tile_diag(tile_cij, clr, cis_exp, exp_v_name, bal_v_name, kernels,
         # so, selecting inside band and nNaNs compliant results:
         # ( drop dropping index maybe ??? ) ...
         res_df.append( result[is_right_band & does_comply_nans] )
-    ########################################################
-    # add everyhting > minimal_separation after the last iteration:
-    ########################################################
+    # # DEBUGGING:
+    # ########################################################
+    # # add everyhting > minimal_separation after the last iteration:
+    # ########################################################
     is_right_band  = (result["bin1_id"] > result["bin2_id"] - right_band)
     is_right_band &= (result["bin1_id"] < result["bin2_id"] - minimal_separation)
+    # ########################################################
     res_df.append( result[is_right_band & does_comply_nans] )
+    # END DEBUGGING HERE:
     # concatenate the resulting list of DataFrames:
     res_df = pd.concat(res_df, ignore_index=True)
     # ####################
@@ -745,6 +765,14 @@ def scoring_and_extraction_step(clr, expected, expected_name, tiles,
     ##########################################
     # concat those 'filtered_pix_chunks' ignoring chunks:
     significant_pixels = pd.concat(filtered_pix_chunks, ignore_index=True)
+    # use some asserrrtions while we're developuing this feature:
+    # assert no duplication, because of the wrong band counting/indexing:
+    #############################################
+    #
+    # ACHTUNG ACHTUNG ACHTUNG: SOME DUPLICATION HAS BEEN CAUGHT HERE ...
+    #
+    #############################################
+    assert ~significant_pixels.duplicated().any()
     # return sorted for convenience:
     return significant_pixels \
                 .sort_values(by=["chrom1","chrom2","start1","start2"]) \
@@ -912,7 +940,7 @@ def thresholding_step(centroids, output_path):
     # # typical FDR threshold commented
     # # as per Rao14 paper, 0.04 was used
     # # for primary 10 kb calls:
-    # FDR_orphan_threshold = 0.04
+    FDR_orphan_threshold = 0.04
     ######################################################################
     # # Temporarily remove orphans filtering, until q-vals are calculated:
     ######################################################################
@@ -1009,7 +1037,11 @@ def thresholding_step(centroids, output_path):
         'la_exp.donut.qval',
         'la_exp.vertical.qval',
         'la_exp.horizontal.qval',
-        'la_exp.lowleft.qval'
+        'la_exp.lowleft.qval',
+        'la_exp.donut.nnans',
+        'la_exp.vertical.nnans',
+        'la_exp.horizontal.nnans',
+        'la_exp.lowleft.nnans'
     ]
 
     if output_path is not None:
@@ -1293,7 +1325,7 @@ def call_dots(
     #              nproc, verbose)
 
     if verbose:
-        print("scoring and histogramming ...")
+        print("scoring and histogramming (DEBUG WAY) ...")
 
 
     ################################
