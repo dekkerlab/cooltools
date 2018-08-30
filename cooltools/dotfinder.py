@@ -522,7 +522,7 @@ def get_adjusted_expected_tile_some_nans(origin,
     io, jo = origin
     # let's extract full matrices and ice_vector:
     O_raw = observed # raw observed, no need to copy, no modifications.
-    E_bal = np.copy(expected)
+    E_bal = np.copy(expected).astype(np.float32)
     # 'bal_weights': ndarray or a couple of those ...
     if isinstance(bal_weights, np.ndarray):
         v_bal_i = bal_weights
@@ -534,6 +534,8 @@ def get_adjusted_expected_tile_some_nans(origin,
                     "for slices of a matrix with diagonal-origin or"
                     "a tuple/list of a couple of numpy.ndarray-s"
                     "for a slice of matrix with an arbitrary origin.")
+    v_bal_i = v_bal_i.astype(np.float32)
+    v_bal_j = v_bal_j.astype(np.float32)
     # kernels must be a dict with kernel-names as keys
     # and kernel ndarrays as values.
     if not isinstance(kernels, dict):
@@ -542,7 +544,7 @@ def get_adjusted_expected_tile_some_nans(origin,
 
     # balanced observed, from raw-observed
     # by element-wise multiply:
-    O_bal = np.multiply(O_raw, np.outer(v_bal_i,v_bal_j))
+    O_bal = np.multiply(O_raw, np.outer(v_bal_i,v_bal_j)).astype(np.float32)
     # O_bal is separate from O_raw memory-wise.
 
     # fill lower triangle of O_bal and E_bal with NaNs
@@ -556,11 +558,6 @@ def get_adjusted_expected_tile_some_nans(origin,
     # # we used to keep the main diagonal there ...
     # O_bal[np.tril_indices_from(O_bal,k=(io-jo)-1)] = np.nan
     # E_bal[np.tril_indices_from(E_bal,k=(io-jo)-1)] = np.nan
-
-
-    # raw E_bal: element-wise division of E_bal[i,j] and
-    # v_bal[i]*v_bal[j]:
-    E_raw = np.divide(E_bal, np.outer(v_bal_i,v_bal_j))
 
     # let's calculate a matrix of common NaNs
     # shared between observed and expected:
@@ -637,9 +634,24 @@ def get_adjusted_expected_tile_some_nans(origin,
         # "boundary issue" to the "number of
         # NaNs"-issue
         # ####################################
-        # now finally, E_raw*(KO/KE), as the 
-        # locally-adjusted expected with raw counts as values:
-        Ek_raw = np.multiply(E_raw, np.divide(KO, KE))
+
+        ########################################################
+        # # the idea is to check if numerical/floating precision
+        # # matters in this case ...
+        ########################################################
+        # # raw E_bal: element-wise division of E_bal[i,j] and
+        # # v_bal[i]*v_bal[j]:
+        E_raw = np.divide(E_bal, np.outer(v_bal_i,v_bal_j))
+        # # now finally, E_raw*(KO/KE), as the 
+        # # locally-adjusted expected with raw counts as values:
+        # Ek_raw = np.multiply(E_raw, np.divide(KO, KE))
+
+        # Try HiCCUPS style:
+        # e_bl = ((Evalue_bl*d[diagDist])/Edistvalue_bl)*kr1[t_row]*kr2[t_col];
+        # e_donut = ((Evalue_donut*d[diagDist])/Edistvalue_donut)*kr1[t_ro
+        Ek_bal = np.divide(np.multiply(KO,E_bal),KE).astype(np.float32)
+        # Ek_raw = (Ek_bal*np.tile(1./v_bal_i,(v_bal_i.size,1))*np.tile(1./v_bal_j,(v_bal_j.size,1)).T).T.astype(np.float32)
+        Ek_raw = np.multiply(Ek_bal,np.outer(1.0/v_bal_i,1.0/v_bal_j))
 
         # this is the place where we would need to extract
         # some results of convolution and multuplt it by the

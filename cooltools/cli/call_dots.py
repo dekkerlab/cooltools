@@ -18,8 +18,8 @@ from .. import dotfinder
 # for lambda-chunking are computed: W1 is the # of logspaced lambda bins,
 # and W2 is maximum "allowed" raw number of contacts per Hi-C heatmap bin:
 HiCCUPS_W1_MAX_INDX = 40
-# HFF combined exceeded this limit ...
-HiCCUPS_W1_MAX_INDX = 46
+# # HFF combined exceeded this limit ...
+# HiCCUPS_W1_MAX_INDX = 46
 # we are not using 'W2' as we're building
 # the histograms dynamically:
 HiCCUPS_W2_MAX_INDX = 10000
@@ -367,7 +367,7 @@ def histogram_scored_pixels(scored_df, kernels, ledges, verbose):
         # needs to be histogrammed in every bin : scored_df["obs.raw"]
         #
         # lambda-bin index for kernel-type "k":
-        lbins = pd.cut(scored_df["la_exp."+k+".value"],ledges)
+        lbins = pd.cut(scored_df["la_exp."+k+".value"],ledges,right=True)
         # now for each lambda-bin construct a histogramm of "obs.raw":
         obs_hist = {}
         for lbin, grp_df in scored_df.groupby(lbins):
@@ -859,75 +859,75 @@ def clustering_step_local(scores_df, expected_chroms,
     return centroids
 
 
-def clustering_step(scores_file, expected_chroms, ktypes, fdr,
-                    dots_clustering_radius, verbose):
-    """
-    This is an old "clustering" step, before lambda-chunking
-    was implemented.
-    This step actually includes both multiple hypothesis
-    testing (its simple genome-wide version of BH-FDR) and
-    a clustering step itself (using Birch from scikit).
-    This method also assumes 'scores_file' to be an external
-    hdf file, and it would try to read the entire file in
-    memory.
-    """
-    res_df = pd.read_hdf(scores_file, 'results')
+# def clustering_step(scores_file, expected_chroms, ktypes, fdr,
+#                     dots_clustering_radius, verbose):
+#     """
+#     This is an old "clustering" step, before lambda-chunking
+#     was implemented.
+#     This step actually includes both multiple hypothesis
+#     testing (its simple genome-wide version of BH-FDR) and
+#     a clustering step itself (using Birch from scikit).
+#     This method also assumes 'scores_file' to be an external
+#     hdf file, and it would try to read the entire file in
+#     memory.
+#     """
+#     res_df = pd.read_hdf(scores_file, 'results')
 
-    # do Benjamin-Hochberg FDR multiple hypothesis tests
-    # genome-wide:
-    for k in ktypes:
-        res_df["la_exp."+k+".qval"] = dotfinder.get_qvals( res_df["la_exp."+k+".pval"] )
+#     # do Benjamin-Hochberg FDR multiple hypothesis tests
+#     # genome-wide:
+#     for k in ktypes:
+#         res_df["la_exp."+k+".qval"] = dotfinder.get_qvals( res_df["la_exp."+k+".pval"] )
 
-    # combine results of all tests:
-    res_df['comply_fdr'] = np.all(
-        res_df[["la_exp."+k+".qval" for k in ktypes]] <= fdr,
-        axis=1)
+#     # combine results of all tests:
+#     res_df['comply_fdr'] = np.all(
+#         res_df[["la_exp."+k+".qval" for k in ktypes]] <= fdr,
+#         axis=1)
 
-    # print a message for timing:
-    if verbose:
-        print("Genome-wide multiple hypothesis testing is done.")
+#     # print a message for timing:
+#     if verbose:
+#         print("Genome-wide multiple hypothesis testing is done.")
 
-    # using different bin12_id_names since all
-    # pixels are annotated at this point.
-    pixel_clust_list = []
-    for chrom  in expected_chroms:
-        if verbose:
-            print("Preparing to cluster dots for {}".format(chrom))
-        # probably generate one big DataFrame with clustering
-        # information only and then just merge it with the
-        # existing 'res_df'-DataFrame.
-        # should we use groupby instead of 'res_df['chrom12']==chrom' ?!
-        # to be tested ...
-        df = res_df[(res_df['comply_fdr'] &
-                    (res_df['chrom1']==chrom) &
-                    (res_df['chrom2']==chrom))]
+#     # using different bin12_id_names since all
+#     # pixels are annotated at this point.
+#     pixel_clust_list = []
+#     for chrom  in expected_chroms:
+#         if verbose:
+#             print("Preparing to cluster dots for {}".format(chrom))
+#         # probably generate one big DataFrame with clustering
+#         # information only and then just merge it with the
+#         # existing 'res_df'-DataFrame.
+#         # should we use groupby instead of 'res_df['chrom12']==chrom' ?!
+#         # to be tested ...
+#         df = res_df[(res_df['comply_fdr'] &
+#                     (res_df['chrom1']==chrom) &
+#                     (res_df['chrom2']==chrom))]
 
-        pixel_clust = dotfinder.clust_2D_pixels(
-            df,
-            threshold_cluster=dots_clustering_radius,
-            bin1_id_name='start1',
-            bin2_id_name='start2',
-            verbose=verbose)
-        pixel_clust_list.append(pixel_clust)
-    if verbose:
-        print("Clustering is over!")
-    # concatenate clustering results ...
-    # indexing information persists here ...
-    pixel_clust_df = pd.concat(pixel_clust_list, ignore_index=False)
+#         pixel_clust = dotfinder.clust_2D_pixels(
+#             df,
+#             threshold_cluster=dots_clustering_radius,
+#             bin1_id_name='start1',
+#             bin2_id_name='start2',
+#             verbose=verbose)
+#         pixel_clust_list.append(pixel_clust)
+#     if verbose:
+#         print("Clustering is over!")
+#     # concatenate clustering results ...
+#     # indexing information persists here ...
+#     pixel_clust_df = pd.concat(pixel_clust_list, ignore_index=False)
 
-    # now merge pixel_clust_df and res_df DataFrame ...
-    # # and merge (index-wise) with the main DataFrame:
-    df = pd.merge(
-        res_df[res_df['comply_fdr']],
-        pixel_clust_df,
-        how='left',
-        left_index=True,
-        right_index=True)
+#     # now merge pixel_clust_df and res_df DataFrame ...
+#     # # and merge (index-wise) with the main DataFrame:
+#     df = pd.merge(
+#         res_df[res_df['comply_fdr']],
+#         pixel_clust_df,
+#         how='left',
+#         left_index=True,
+#         right_index=True)
 
-    # report only centroids with highest Observed:
-    chrom_clust_group = df.groupby(["chrom1", "chrom2", "c_label"])
-    centroids = df.loc[chrom_clust_group["obs.raw"].idxmax()]
-    return centroids
+#     # report only centroids with highest Observed:
+#     chrom_clust_group = df.groupby(["chrom1", "chrom2", "c_label"])
+#     centroids = df.loc[chrom_clust_group["obs.raw"].idxmax()]
+#     return centroids
 
 
 def thresholding_step(centroids, output_path):
@@ -937,10 +937,10 @@ def thresholding_step(centroids, output_path):
     enrichment_factor_2 = 1.75
     enrichment_factor_3 = 2.0
     FDR_orphan_threshold = 0.02
-    # # typical FDR threshold commented
-    # # as per Rao14 paper, 0.04 was used
-    # # for primary 10 kb calls:
-    FDR_orphan_threshold = 0.04
+    # # # typical FDR threshold commented
+    # # # as per Rao14 paper, 0.04 was used
+    # # # for primary 10 kb calls:
+    # FDR_orphan_threshold = 0.04
     ######################################################################
     # # Temporarily remove orphans filtering, until q-vals are calculated:
     ######################################################################
@@ -1267,11 +1267,23 @@ def call_dots(
 
     # creating logspace l(ambda)bins with base=2^(1/3), for lambda-chunking:
     nlchunks = HiCCUPS_W1_MAX_INDX
+    # # HiCCUPS is using slightly different base
+    # # for the expected binning:
+    # apparently they do Poisson using 1/3:
     base = 2**(1/3.0)
-    ledges = np.concatenate(([-np.inf,],
-                            np.logspace(0,
+    mu_ledges = np.concatenate(([-np.inf,],
+                            np.logspace(1,
                                         nlchunks-1,
-                                        num=nlchunks,
+                                        num=nlchunks-1,
+                                        base=base,
+                                        dtype=np.float),
+                            [np.inf,]))
+    # apparently they define borders using 0.33
+    base = 2**(0.33)
+    ledges = np.concatenate(([-np.inf,],
+                            np.logspace(1,
+                                        nlchunks-1,
+                                        num=nlchunks-1,
                                         base=base,
                                         dtype=np.float),
                             [np.inf,]))
@@ -1373,7 +1385,7 @@ def call_dots(
         # a unit Poisson distribution for every lambda-chunk
         # using upper boundary of each lambda-chunk as the expected:
         rcs_Poisson[k] = pd.DataFrame()
-        for mu, column in zip(ledges[1:-1], gw_hist[k].columns):
+        for mu, column in zip(mu_ledges[1:-1], gw_hist[k].columns):
             # poisson.sf = 1 - poisson.cdf, but more precise
             # poisson.sf(-1,mu) == 1.0, i.e. is equivalent to the
             # poisson.pmf(gw_hist[k].index,mu)[::-1].cumsum()[::-1]
