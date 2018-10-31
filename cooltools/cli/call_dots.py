@@ -1119,6 +1119,17 @@ def thresholding_step(centroids, output_path):
     show_default=True,
     )
 @click.option(
+    # setting HiCCUPS_W1_MAX_INDX from command line ...
+    '--hist-max-bins-expected',
+    help='Parameter corresponding to HiCCUPS_W1_MAX_INDX constant.'
+         'It controls binning of locally adjusted expected, and should be adjusted'
+         'in case the dynamic range of your input data exceeds the default limit'
+         'It is a temporary solution to be replaced with a dynamic reimplementation',
+    type=int,
+    default=40,
+    show_default=True,
+    )
+@click.option(
     "--verbose", "-v",
     help="Enable verbose output",
     is_flag=True,
@@ -1266,7 +1277,9 @@ def call_dots(
     kernels = {k: get_kernel(w,p,k) for k in ktypes}
 
     # creating logspace l(ambda)bins with base=2^(1/3), for lambda-chunking:
-    nlchunks = HiCCUPS_W1_MAX_INDX
+    # nlchunks = HiCCUPS_W1_MAX_INDX
+    # take HiCCUPS_W1_MAX_INDX from command line options for now:
+    nlchunks = hist_max_bins_expected
     # # HiCCUPS is using slightly different base
     # # for the expected binning:
     # apparently they do Poisson using 1/3:
