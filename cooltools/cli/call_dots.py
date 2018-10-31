@@ -1156,6 +1156,7 @@ def call_dots(
         tile_size,
         fdr,
         dots_clustering_radius,
+        hist_max_bins_expected,
         verbose,
         output_scores,
         output_calls):
