@@ -29,6 +29,7 @@ MOCK_MODULES = [
     'matplotlib.pyplot',
     'numba',
     # 'numpy',
+    'cytoolz',
     'pandas',
     'scipy',
     'scipy.interpolate',
